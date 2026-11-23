@@ -7,6 +7,7 @@ use std::{
 };
 
 use minus27_core::{
+    diary::{self, DayLog},
     state::Settings,
     weight::{self, Entry},
 };
@@ -19,6 +20,8 @@ use crate::sync::Session;
 pub struct Data {
     pub settings: Settings,
     pub entries: Vec<Entry>,
+    /// Дневник питания и вода, по дням.
+    pub days: Vec<DayLog>,
     /// Изменения, ещё не отправленные на сервер. Копятся всегда,
     /// чтобы при включении синка ничего не потерялось.
     pub pending: Vec<Pending>,
@@ -30,9 +33,22 @@ pub struct Data {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Pending {
+    /// Что изменилось. В первой версии было только «вес», поэтому по умолчанию он.
+    #[serde(default)]
+    pub kind: Kind,
+    /// Дата для веса и дней, пусто для настроек.
     pub date: String,
     pub op: Op,
     pub t: i64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    #[default]
+    Weight,
+    Day,
+    Settings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,17 +59,23 @@ pub enum Op {
 }
 
 impl Data {
-    pub fn mark(&mut self, date: &str, op: Op, t: i64) {
-        self.pending.retain(|p| p.date != date);
-        self.pending.push(Pending { date: date.to_string(), op, t });
+    pub fn mark(&mut self, kind: Kind, date: &str, op: Op, t: i64) {
+        self.pending.retain(|p| !(p.kind == kind && p.date == date));
+        self.pending.push(Pending { kind, date: date.to_string(), op, t });
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot { settings: self.settings.clone(), entries: self.entries.clone(), days: self.days.clone() }
     }
 }
 
-/// То, что UI получает при старте.
-#[derive(Serialize, Deserialize)]
+/// Все данные для UI: при старте и после синка.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub settings: Settings,
     pub entries: Vec<Entry>,
+    #[serde(default)]
+    pub days: Vec<DayLog>,
 }
 
 pub trait Store: Send + Sync {
@@ -139,11 +161,63 @@ impl Db {
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        self.read(|d| Snapshot { settings: d.settings.clone(), entries: d.entries.clone() })
+        self.read(Data::snapshot)
     }
 
-    pub fn save_settings(&self, settings: Settings) -> Result<(), String> {
-        self.write(|d| d.settings = settings).map_err(|e| e.to_string())
+    /// Сохраняет настройки. Синк запускается, только если поменялось что-то кроме
+    /// вкладки и выбранного дня: их переключают постоянно, на сервер они не нужны.
+    pub fn save_settings(&self, mut settings: Settings) -> Result<Settings, String> {
+        let t = now_ms();
+        self.write(|d| {
+            let ui_only = Settings { tab: d.settings.tab, day: d.settings.day, updated_ms: d.settings.updated_ms, ..settings.clone() };
+            if ui_only != d.settings {
+                settings.updated_ms = t;
+                d.mark(Kind::Settings, "", Op::Up, t);
+            } else {
+                settings.updated_ms = d.settings.updated_ms;
+            }
+            d.settings = settings;
+            d.settings.clone()
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    /// Сохраняет день дневника целиком и возвращает все дни.
+    pub fn save_day(&self, day: DayLog) -> Result<Vec<DayLog>, String> {
+        weight::day_num(&day.date).ok_or("Неверная дата")?;
+        let t = now_ms();
+        self.write(|d| {
+            d.mark(Kind::Day, &day.date, Op::Up, t);
+            diary::upsert(&mut d.days, DayLog { updated_ms: t, ..day });
+            d.days.clone()
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    /// Заменить все данные (импорт из файла). Всё помечается к отправке на сервер.
+    pub fn import(&self, snap: Snapshot) -> Result<Snapshot, String> {
+        for e in &snap.entries {
+            weight::check(e, None).map_err(|m| format!("{}: {m}", e.date))?;
+        }
+        let t = now_ms();
+        self.write(|d| {
+            let (tab, session, linked) = (d.settings.tab, d.session.take(), d.linked.take());
+            *d = Data { settings: Settings { tab, updated_ms: t, ..snap.settings }, entries: snap.entries, days: snap.days, ..Data::default() };
+            d.session = session;
+            d.linked = linked;
+            d.mark(Kind::Settings, "", Op::Up, t);
+            let dates: Vec<(Kind, String)> = d
+                .entries
+                .iter()
+                .map(|e| (Kind::Weight, e.date.clone()))
+                .chain(d.days.iter().map(|x| (Kind::Day, x.date.clone())))
+                .collect();
+            for (k, date) in dates {
+                d.mark(k, &date, Op::Up, t);
+            }
+            d.snapshot()
+        })
+        .map_err(|e| e.to_string())
     }
 
     /// Сохраняет запись (новую или поверх старой за ту же дату) и возвращает все записи.
@@ -151,7 +225,7 @@ impl Db {
         weight::check(&entry, None)?;
         let t = now_ms();
         self.write(|d| {
-            d.mark(&entry.date, Op::Up, t);
+            d.mark(Kind::Weight, &entry.date, Op::Up, t);
             weight::upsert(&mut d.entries, Entry { updated_ms: t, ..entry });
             d.entries.clone()
         })
@@ -162,7 +236,7 @@ impl Db {
         let t = now_ms();
         self.write(|d| {
             if weight::remove(&mut d.entries, date) {
-                d.mark(date, Op::Del, t);
+                d.mark(Kind::Weight, date, Op::Del, t);
             }
             d.entries.clone()
         })

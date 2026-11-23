@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Категория продукта, по ней группируется список покупок.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Cat {
     Meat,
     Dairy,
@@ -23,6 +24,17 @@ impl Cat {
         }
     }
 
+    /// Имя иконки в UI (src/icons.rs).
+    pub fn icon(self) -> &'static str {
+        match self {
+            Cat::Meat => "meat",
+            Cat::Dairy => "milk",
+            Cat::Grain => "grain",
+            Cat::Veg => "leaf",
+            Cat::Other => "nut",
+        }
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Cat::Meat => "Мясо и рыба",
@@ -35,7 +47,7 @@ impl Cat {
 }
 
 /// Штучный продукт: вес одной штуки и подпись («шт», «бел.»).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Piece {
     pub grams: u16,
     pub label: &'static str,
@@ -183,28 +195,120 @@ impl FoodId {
     }
 }
 
-/// Количество в плане: «2 шт · 100 г», «250 мл», «80 г».
-pub fn qty(id: FoodId, grams: u32) -> String {
-    let f = id.info();
-    match f.piece {
-        Some(p) if p.label == "шт" => format!("{} шт · {} г", round_div(grams, p.grams as u32), grams),
-        _ if f.ml => format!("{grams} мл"),
-        _ => format!("{grams} г"),
+/// Свой продукт пользователя: КБЖУ на 100 г.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CustomFood {
+    pub id: String,
+    pub name: String,
+    pub kcal: f64,
+    pub protein: f64,
+    pub cat: Cat,
+}
+
+/// Ссылка на продукт: встроенный или свой.
+/// `untagged`: встроенный пишется строкой ("egg"), как раньше, поэтому старые данные читаются.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FoodRef {
+    Base(FoodId),
+    Custom { custom: String },
+}
+
+impl From<FoodId> for FoodRef {
+    fn from(id: FoodId) -> Self {
+        FoodRef::Base(id)
     }
 }
 
-/// Количество в списке покупок: штуки округляются вверх, большие объёмы в кг и л.
+/// Всё, что нужно знать о продукте для расчётов и показа.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FoodView {
+    pub name: String,
+    pub kcal: f64,
+    pub protein: f64,
+    pub cat: Cat,
+    pub piece: Option<Piece>,
+    pub ml: bool,
+}
+
+impl FoodRef {
+    /// `None`, если свой продукт удалён.
+    pub fn view(&self, customs: &[CustomFood]) -> Option<FoodView> {
+        match self {
+            FoodRef::Base(id) => {
+                let f = id.info();
+                Some(FoodView {
+                    name: f.name.to_string(),
+                    kcal: f.kcal,
+                    protein: f.protein,
+                    cat: f.cat,
+                    piece: f.piece,
+                    ml: f.ml,
+                })
+            }
+            FoodRef::Custom { custom } => customs.iter().find(|c| &c.id == custom).map(|c| FoodView {
+                name: c.name.clone(),
+                kcal: c.kcal,
+                protein: c.protein,
+                cat: c.cat,
+                piece: None,
+                ml: false,
+            }),
+        }
+    }
+}
+
+impl FoodId {
+    pub const ALL: [FoodId; 35] = {
+        use FoodId::*;
+        [
+            Egg, White, Oats, Berry, Banana, Chicken, Rice, Veg, Oil, Salmon, Potato, Broccoli, Gyog, Apple, Nuts,
+            Almond, Curd, Turkey, Buck, Avocado, Bread, Kefir, Protein, Pb, Milk, Beef, Fish, Quinoa, Kiwi, Chia,
+            Bulgur, Shrimp, Orange, Cheese, Honey,
+        ]
+    };
+}
+
+/// Все продукты для выбора: встроенные и свои.
+pub fn catalog(customs: &[CustomFood]) -> Vec<(FoodRef, FoodView)> {
+    FoodId::ALL
+        .iter()
+        .map(|&id| FoodRef::Base(id))
+        .chain(customs.iter().map(|c| FoodRef::Custom { custom: c.id.clone() }))
+        .filter_map(|r| r.view(customs).map(|v| (r, v)))
+        .collect()
+}
+
+impl FoodView {
+    /// Количество в плане: «2 шт · 100 г», «250 мл», «80 г».
+    pub fn qty(&self, grams: u32) -> String {
+        match self.piece {
+            Some(p) if p.label == "шт" => format!("{} шт · {} г", round_div(grams, p.grams as u32), grams),
+            _ if self.ml => format!("{grams} мл"),
+            _ => format!("{grams} г"),
+        }
+    }
+
+    /// Количество в списке покупок: штуки округляются вверх, большие объёмы в кг и л.
+    pub fn shop_qty(&self, grams: u32) -> String {
+        if let Some(p) = self.piece {
+            return format!("≈ {} {} ({} г)", grams.div_ceil(p.grams as u32), p.label, grams);
+        }
+        let (small, big) = if self.ml { ("мл", "л") } else { ("г", "кг") };
+        if grams >= 1000 {
+            format!("{} {big}", format!("{:.2}", grams as f64 / 1000.0).replace('.', ","))
+        } else {
+            format!("{grams} {small}")
+        }
+    }
+}
+
+pub fn qty(id: FoodId, grams: u32) -> String {
+    FoodRef::Base(id).view(&[]).map(|v| v.qty(grams)).unwrap_or_default()
+}
+
 pub fn shop_qty(id: FoodId, grams: u32) -> String {
-    let f = id.info();
-    if let Some(p) = f.piece {
-        return format!("≈ {} {} ({} г)", grams.div_ceil(p.grams as u32), p.label, grams);
-    }
-    let (small, big) = if f.ml { ("мл", "л") } else { ("г", "кг") };
-    if grams >= 1000 {
-        format!("{} {big}", format!("{:.2}", grams as f64 / 1000.0).replace('.', ","))
-    } else {
-        format!("{grams} {small}")
-    }
+    FoodRef::Base(id).view(&[]).map(|v| v.shop_qty(grams)).unwrap_or_default()
 }
 
 fn round_div(a: u32, b: u32) -> u32 {
@@ -214,6 +318,15 @@ fn round_div(a: u32, b: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn food_ref_reads_old_strings() {
+        let r: FoodRef = serde_json::from_str("\"egg\"").unwrap();
+        assert_eq!(r, FoodRef::Base(FoodId::Egg));
+        let c: FoodRef = serde_json::from_str("{\"custom\":\"x1\"}").unwrap();
+        assert_eq!(c, FoodRef::Custom { custom: "x1".into() });
+        assert_eq!(serde_json::to_string(&FoodRef::Base(FoodId::Pb)).unwrap(), "\"pb\"");
+    }
 
     #[test]
     fn quantities() {

@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::foods::FoodId::{self, *};
+use crate::foods::{
+    CustomFood, FoodRef, FoodView,
+    FoodId::{self, *},
+};
 
 /// Цель по белку в день, г.
 pub const TARGET_PROTEIN: f64 = 150.0;
@@ -169,6 +172,178 @@ pub fn shopping_list(days: &[u8], mode: Mode) -> Vec<(FoodId, u32)> {
     acc
 }
 
+// ---------- План пользователя ----------
+// Встроенный PLAN — шаблон. Человек видит его копию, масштабированную под свою норму,
+// а после первой правки — свой план (`Settings::custom_plan`).
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MealKind {
+    Breakfast,
+    Lunch,
+    Dinner,
+    Snack,
+}
+
+impl MealKind {
+    pub const ALL: [MealKind; 4] = [MealKind::Breakfast, MealKind::Lunch, MealKind::Dinner, MealKind::Snack];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            MealKind::Breakfast => "Завтрак",
+            MealKind::Lunch => "Обед",
+            MealKind::Dinner => "Ужин",
+            MealKind::Snack => "Перекус",
+        }
+    }
+
+    /// Имя иконки в UI (src/icons.rs).
+    pub fn icon(self) -> &'static str {
+        match self {
+            MealKind::Breakfast => "sunrise",
+            MealKind::Lunch => "sun",
+            MealKind::Dinner => "moon",
+            MealKind::Snack => "apple",
+        }
+    }
+
+    /// Обычное время приёма, часы.
+    pub fn hour(self) -> u32 {
+        match self {
+            MealKind::Breakfast => 8,
+            MealKind::Lunch => 13,
+            MealKind::Snack => 16,
+            MealKind::Dinner => 19,
+        }
+    }
+
+    /// Какой приём сейчас по времени.
+    pub fn at_hour(h: u32) -> MealKind {
+        match h {
+            0..=10 => MealKind::Breakfast,
+            11..=14 => MealKind::Lunch,
+            15..=17 => MealKind::Snack,
+            _ => MealKind::Dinner,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlanItem {
+    pub food: FoodRef,
+    pub grams: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlanMeal {
+    pub kind: MealKind,
+    pub items: Vec<PlanItem>,
+}
+
+pub type PlanDay = Vec<PlanMeal>;
+
+const KINDS: [MealKind; 4] = [MealKind::Breakfast, MealKind::Lunch, MealKind::Dinner, MealKind::Snack];
+
+/// Встроенное меню как данные (убранные в режиме продукты выпадают).
+pub fn base_plan(mode: Mode) -> Vec<PlanDay> {
+    PLAN.iter()
+        .map(|day| {
+            day.iter()
+                .zip(KINDS)
+                .map(|(m, kind)| PlanMeal {
+                    kind,
+                    items: m
+                        .items
+                        .iter()
+                        .map(|it| PlanItem { food: it.food.into(), grams: grams_of(it, mode) as u32 })
+                        .filter(|it| it.grams > 0)
+                        .collect(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Встроенное меню «минус», масштабированное под норму калорий.
+/// Порции округляются до 5 г, масштаб ограничен 0,6–1,6, чтобы меню оставалось разумным.
+pub fn scaled_plan(target_kcal: f64) -> Vec<PlanDay> {
+    let base = week_average(Mode::Cut).kcal;
+    let k = (target_kcal / base).clamp(0.6, 1.6);
+    let mut plan = base_plan(Mode::Cut);
+    for day in &mut plan {
+        for meal in day {
+            for it in &mut meal.items {
+                // Яйца — целыми штуками, остальное с шагом 5 г.
+                let step = match &it.food {
+                    FoodRef::Base(id) => id.info().piece.filter(|p| p.label == "шт").map_or(5.0, |p| p.grams as f64),
+                    FoodRef::Custom { .. } => 5.0,
+                };
+                it.grams = ((it.grams as f64 * k / step).round() * step).max(step) as u32;
+            }
+        }
+    }
+    plan
+}
+
+pub fn items_totals(items: &[PlanItem], customs: &[CustomFood]) -> Totals {
+    let mut t = Totals::default();
+    for it in items {
+        if let Some(v) = it.food.view(customs) {
+            t += view_totals(&v, it.grams);
+        }
+    }
+    t
+}
+
+pub fn view_totals(v: &FoodView, grams: u32) -> Totals {
+    let g = grams as f64 / 100.0;
+    Totals { kcal: v.kcal * g, protein: v.protein * g }
+}
+
+pub fn plan_day_totals(day: &PlanDay, customs: &[CustomFood]) -> Totals {
+    let mut t = Totals::default();
+    for m in day {
+        t += items_totals(&m.items, customs);
+    }
+    t
+}
+
+pub fn plan_week_average(plan: &[PlanDay], customs: &[CustomFood]) -> Totals {
+    if plan.is_empty() {
+        return Totals::default();
+    }
+    let mut t = Totals::default();
+    for d in plan {
+        t += plan_day_totals(d, customs);
+    }
+    let n = plan.len() as f64;
+    Totals { kcal: t.kcal / n, protein: t.protein / n }
+}
+
+/// Покупки на выбранные дни плана, в порядке первого появления.
+pub fn plan_shopping_list(plan: &[PlanDay], days: &[u8]) -> Vec<(FoodRef, u32)> {
+    let mut acc: Vec<(FoodRef, u32)> = Vec::new();
+    for &d in days {
+        let Some(day) = plan.get(d as usize) else { continue };
+        for it in day.iter().flat_map(|m| &m.items) {
+            match acc.iter_mut().find(|(f, _)| *f == it.food) {
+                Some((_, sum)) => *sum += it.grams,
+                None => acc.push((it.food.clone(), it.grams)),
+            }
+        }
+    }
+    acc
+}
+
+/// Сколько граммов нового продукта дают те же калории. Округление до 5 г.
+pub fn swap_grams(from: &FoodView, grams: u32, to: &FoodView) -> u32 {
+    if to.kcal <= 0.0 {
+        return grams;
+    }
+    let g = from.kcal * grams as f64 / to.kcal;
+    ((g / 5.0).round() * 5.0).clamp(5.0, 2000.0) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +377,53 @@ mod tests {
         assert_eq!(get(Nuts), None);
         assert_eq!(get(Honey), None);
         assert_eq!(list.len(), 32);
+    }
+
+    #[test]
+    fn base_plan_matches_static_plan() {
+        let p = base_plan(Mode::Cut);
+        let avg = plan_week_average(&p, &[]);
+        assert!((avg.kcal - week_average(Mode::Cut).kcal).abs() < 1e-9);
+        // убранные в «минусе» продукты выпали
+        assert!(p.iter().flatten().flat_map(|m| &m.items).all(|it| it.grams > 0));
+        assert_eq!(p[0][0].kind, MealKind::Breakfast);
+    }
+
+    #[test]
+    fn scaled_plan_hits_target() {
+        for target in [1600.0, 2090.0, 2400.0] {
+            let avg = plan_week_average(&scaled_plan(target), &[]).kcal;
+            assert!((avg - target).abs() / target < 0.03, "{target}: {avg}");
+        }
+    }
+
+    #[test]
+    fn scaled_eggs_are_whole() {
+        let p = scaled_plan(2090.0);
+        let eggs = p.iter().flatten().flat_map(|m| &m.items).filter(|i| i.food == FoodRef::Base(Egg));
+        for e in eggs {
+            assert_eq!(e.grams % 50, 0, "{}", e.grams);
+        }
+    }
+
+    #[test]
+    fn swap_keeps_kcal() {
+        let rice = FoodRef::Base(Rice).view(&[]).unwrap();
+        let buck = FoodRef::Base(Buck).view(&[]).unwrap();
+        assert_eq!(swap_grams(&rice, 60, &buck), 60); // 350 vs 340 ккал → ~62 → 60
+        let chicken = FoodRef::Base(Chicken).view(&[]).unwrap();
+        let salmon = FoodRef::Base(Salmon).view(&[]).unwrap();
+        assert_eq!(swap_grams(&chicken, 200, &salmon), 115);
+    }
+
+    #[test]
+    fn plan_shopping_matches_static() {
+        let all: Vec<u8> = (0..7).collect();
+        let new = plan_shopping_list(&base_plan(Mode::Cut), &all);
+        let old = shopping_list(&all, Mode::Cut);
+        assert_eq!(new.len(), old.len());
+        for ((a, ga), (b, gb)) in new.iter().zip(&old) {
+            assert_eq!((a, ga), (&FoodRef::Base(*b), gb));
+        }
     }
 }

@@ -2,11 +2,14 @@
 //! Сама логика в minus27-data: её же использует сайт.
 
 use minus27_core::{
-    state::{Settings, SyncInfo},
+    diary::DayLog,
+    state::{Reminder, Settings, SyncInfo},
     weight::Entry,
 };
-use minus27_data::{Db, Remote, Snapshot};
-use tauri::State;
+use minus27_data::{Db, Remote, Snapshot, sync::Estimate};
+use tauri::{AppHandle, State};
+
+use crate::reminders;
 
 #[tauri::command]
 pub fn load(db: State<'_, Db>) -> Snapshot {
@@ -14,7 +17,7 @@ pub fn load(db: State<'_, Db>) -> Snapshot {
 }
 
 #[tauri::command]
-pub fn save_settings(db: State<'_, Db>, settings: Settings) -> Result<(), String> {
+pub fn save_settings(db: State<'_, Db>, settings: Settings) -> Result<Settings, String> {
     db.save_settings(settings)
 }
 
@@ -26,6 +29,16 @@ pub fn save_entry(db: State<'_, Db>, entry: Entry) -> Result<Vec<Entry>, String>
 #[tauri::command]
 pub fn delete_entry(db: State<'_, Db>, date: String) -> Result<Vec<Entry>, String> {
     db.delete_entry(&date)
+}
+
+#[tauri::command]
+pub fn save_day(db: State<'_, Db>, day: DayLog) -> Result<Vec<DayLog>, String> {
+    db.save_day(day)
+}
+
+#[tauri::command]
+pub fn import_data(db: State<'_, Db>, data: Snapshot) -> Result<Snapshot, String> {
+    db.import(data)
 }
 
 #[tauri::command]
@@ -49,6 +62,17 @@ pub fn sign_out(db: State<'_, Db>, remote: State<'_, Remote>) -> Result<SyncInfo
 }
 
 #[tauri::command]
-pub async fn sync_now(db: State<'_, Db>, remote: State<'_, Remote>) -> Result<Vec<Entry>, String> {
+pub async fn sync_now(db: State<'_, Db>, remote: State<'_, Remote>) -> Result<Snapshot, String> {
     remote.sync(&db).await
+}
+
+#[tauri::command]
+pub async fn estimate_food(db: State<'_, Db>, remote: State<'_, Remote>, image: String) -> Result<Estimate, String> {
+    remote.estimate_food(&db, &image).await
+}
+
+/// Поставить напоминания. `false` — уведомления не разрешены или платформа их не умеет.
+#[tauri::command]
+pub fn set_reminders(app: AppHandle, list: Vec<Reminder>) -> Result<bool, String> {
+    reminders::apply(&app, &list)
 }

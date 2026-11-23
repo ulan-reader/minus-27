@@ -3,8 +3,9 @@ mod app;
 mod chart;
 mod components;
 mod fmt;
+mod icons;
 mod js;
-mod tabs;
+mod screens;
 
 use app::*;
 use leptos::prelude::*;

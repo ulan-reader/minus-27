@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" rx="230" fill="#12a46b"/>
+  <path d="M512 196c-22 120-128 182-128 318 0 30 6 58 18 82-40-30-62-80-62-132-86 72-128 160-128 250 0 160 136 266 300 266s300-106 300-266c0-180-120-300-186-404-6 74-30 120-74 150 10-108-12-188-40-264z" fill="#ffffff" opacity="0.18"/>
+  <text x="512" y="640" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="360" font-weight="800" fill="#ffffff" letter-spacing="-12">−27</text>
+</svg>

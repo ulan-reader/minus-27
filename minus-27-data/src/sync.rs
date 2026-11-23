@@ -1,14 +1,18 @@
 //! Синхронизация с Supabase через REST, без SDK.
 //!
-//! Схема: локальные изменения копятся в `Data::pending`. `sync` отправляет их
-//! (upsert и delete), скачивает все записи с сервера и кладёт их поверх локальных.
-//! Изменения, сделанные во время синка, остаются в `pending` и не теряются.
+//! Три таблицы: weight_entries (вес по дням), day_logs (дневник и вода по дням)
+//! и profiles (профиль и настройки, одна строка на человека). Схема: supabase/schema.sql.
+//!
+//! Локальные изменения копятся в `Data::pending`. `sync` отправляет их,
+//! скачивает всё с сервера и кладёт поверх локального. Изменения, сделанные
+//! во время синка, остаются в `pending` и не теряются.
 //! Включается заполнением supabase/supabase.env (см. config.rs).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use minus27_core::{
-    state::SyncInfo,
+    diary::{self, DayLog, DiaryItem},
+    state::{Settings, SyncInfo},
     weight::{self, Entry},
 };
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
@@ -17,7 +21,7 @@ use serde_json::{Value, json};
 
 use crate::{
     config,
-    storage::{self, Db, Op},
+    storage::{self, Data, Db, Kind, Op, Snapshot},
 };
 
 /// Вход в Supabase. Хранится вместе с данными (data.json или localStorage).
@@ -86,13 +90,13 @@ impl Remote {
         Ok(self.info(db))
     }
 
-    /// Возвращает записи после синка. Если синк уже идёт, отдаёт текущие
-    /// локальные записи, а идущий синк потом прогонится ещё раз.
-    pub async fn sync(&self, db: &Db) -> Result<Vec<Entry>, String> {
+    /// Возвращает все данные после синка. Если синк уже идёт, отдаёт текущие
+    /// локальные данные, а идущий синк потом прогонится ещё раз.
+    pub async fn sync(&self, db: &Db) -> Result<Snapshot, String> {
         let Remote::Supabase(sb) = self else { return Err(OFF.into()) };
         if sb.busy.swap(true, Ordering::SeqCst) {
             sb.again.store(true, Ordering::SeqCst);
-            return Ok(db.read(|d| d.entries.clone()));
+            return Ok(db.snapshot());
         }
         let mut res = sb.run(db).await;
         while res.is_ok() && sb.again.swap(false, Ordering::SeqCst) {
@@ -102,6 +106,36 @@ impl Remote {
         sb.busy.store(false, Ordering::SeqCst);
         res
     }
+
+    /// Оценка калорий по фото через Edge Function `estimate-food` (supabase/functions).
+    /// `image` — JPEG в base64. Ключ ИИ живёт только на сервере.
+    pub async fn estimate_food(&self, db: &Db, image: &str) -> Result<Estimate, String> {
+        let Remote::Supabase(sb) = self else { return Err("Нужна синхронизация с Supabase".into()) };
+        let mut s = sb.session(db).await?;
+        let body = json!({ "image": image, "media_type": "image/jpeg" });
+        let r = sb.rest(db, &mut s, Method::POST, "/functions/v1/estimate-food", |r| r.json(&body)).await?;
+        r.json().await.map_err(net_err)
+    }
+}
+
+/// Ответ ИИ по фото: продукты с оценкой граммов, калорий и белка.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Estimate {
+    pub items: Vec<EstimateItem>,
+    /// Пояснение ИИ, например «соус не виден, мог быть майонез».
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Сколько фото ещё можно распознать сегодня.
+    #[serde(default)]
+    pub left_today: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EstimateItem {
+    pub name: String,
+    pub grams: u32,
+    pub kcal: f64,
+    pub protein: f64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -122,6 +156,8 @@ fn http_client() -> reqwest::Result<Client> {
 }
 
 const OFF: &str = "Синхронизация выключена";
+/// Edge Function не задеплоена или без ключа ИИ (тот же текст отдаёт сама функция).
+const AI_OFF: &str = "Распознавание фото пока не настроено";
 const PAGE: usize = 1000;
 
 /// Строка таблицы weight_entries.
@@ -133,6 +169,38 @@ struct Row {
     weight_kg: f64,
     waist_cm: Option<f64>,
     steps: Option<u32>,
+    #[serde(default)]
+    hips_cm: Option<f64>,
+    #[serde(default)]
+    chest_cm: Option<f64>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+/// Строка таблицы day_logs: день целиком в jsonb.
+#[derive(Serialize, Deserialize)]
+struct DayRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_id: Option<String>,
+    log_date: String,
+    data: DayData,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct DayData {
+    items: Vec<DiaryItem>,
+    water_ml: u32,
+}
+
+/// Строка таблицы profiles: настройки целиком в jsonb.
+#[derive(Serialize, Deserialize)]
+struct ProfileRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_id: Option<String>,
+    data: Settings,
     #[serde(default)]
     updated_at: Option<String>,
 }
@@ -154,100 +222,141 @@ struct AuthUser {
 }
 
 impl Supabase {
-    async fn run(&self, db: &Db) -> Result<Vec<Entry>, String> {
+    async fn run(&self, db: &Db) -> Result<Snapshot, String> {
         let mut s = self.session(db).await?;
+        let uid = s.user_id.clone();
 
-        // Первый синк под этим аккаунтом: отправить все локальные записи.
+        // Первый синк под этим аккаунтом: отправить всё, что есть на устройстве.
         let now = storage::now_ms();
         db.write(|d| {
-            if d.linked.as_deref() != Some(s.user_id.as_str()) {
-                let dates: Vec<String> = d.entries.iter().map(|e| e.date.clone()).collect();
-                for date in dates {
-                    d.mark(&date, Op::Up, now);
+            if d.linked.as_deref() != Some(uid.as_str()) {
+                let keys: Vec<(Kind, String)> = d
+                    .entries
+                    .iter()
+                    .map(|e| (Kind::Weight, e.date.clone()))
+                    .chain(d.days.iter().map(|x| (Kind::Day, x.date.clone())))
+                    .collect();
+                for (k, date) in keys {
+                    d.mark(k, &date, Op::Up, now);
                 }
-                d.linked = Some(s.user_id.clone());
+                if d.settings.profile.is_some() {
+                    d.mark(Kind::Settings, "", Op::Up, now);
+                }
+                d.linked = Some(uid.clone());
             }
         })
         .map_err(io_err)?;
 
-        let (pending, entries) = db.read(|d| (d.pending.clone(), d.entries.clone()));
+        // 1. Отправить изменения.
+        let (pending, data) = db.read(|d| (d.pending.clone(), d.snapshot()));
+        let stamp = |ms: i64| Some(iso_ms(if ms > 0 { ms } else { now }));
         let ups: Vec<Row> = pending
             .iter()
-            .filter(|p| p.op == Op::Up)
-            .filter_map(|p| entries.iter().find(|e| e.date == p.date))
+            .filter(|p| p.kind == Kind::Weight && p.op == Op::Up)
+            .filter_map(|p| data.entries.iter().find(|e| e.date == p.date))
             .map(|e| Row {
-                user_id: Some(s.user_id.clone()),
+                user_id: Some(uid.clone()),
                 entry_date: e.date.clone(),
                 weight_kg: e.weight,
                 waist_cm: e.waist,
                 steps: e.steps,
-                updated_at: Some(iso_ms(if e.updated_ms > 0 { e.updated_ms } else { now })),
+                hips_cm: e.hips,
+                chest_cm: e.chest,
+                updated_at: stamp(e.updated_ms),
             })
             .collect();
-        let dels: Vec<&str> = pending.iter().filter(|p| p.op == Op::Del).map(|p| p.date.as_str()).collect();
-
-        if !ups.is_empty() {
-            let body = serde_json::to_value(&ups).map_err(|e| e.to_string())?;
-            self.rest(db, &mut s, Method::POST, "/rest/v1/weight_entries?on_conflict=user_id,entry_date", |r| {
-                r.header("Prefer", "resolution=merge-duplicates,return=minimal").json(&body)
+        let dels: Vec<&str> = pending
+            .iter()
+            .filter(|p| p.kind == Kind::Weight && p.op == Op::Del)
+            .map(|p| p.date.as_str())
+            .collect();
+        let days: Vec<DayRow> = pending
+            .iter()
+            .filter(|p| p.kind == Kind::Day)
+            .filter_map(|p| data.days.iter().find(|x| x.date == p.date))
+            .map(|x| DayRow {
+                user_id: Some(uid.clone()),
+                log_date: x.date.clone(),
+                data: DayData { items: x.items.clone(), water_ml: x.water_ml },
+                updated_at: stamp(x.updated_ms),
             })
-            .await?;
-        }
+            .collect();
+        let settings_up = pending.iter().any(|p| p.kind == Kind::Settings);
+
+        self.upsert(db, &mut s, "weight_entries", "user_id,entry_date", &ups).await?;
         if !dels.is_empty() {
             // Даты вида 2026-11-23, экранировать нечего. Чужие строки отсекает RLS.
             let path = format!("/rest/v1/weight_entries?entry_date=in.({})", dels.join(","));
             self.rest(db, &mut s, Method::DELETE, &path, |r| r.header("Prefer", "return=minimal")).await?;
         }
-        // Убираем только отправленное: если запись поменяли во время синка, её t другой.
-        db.write(|d| d.pending.retain(|p| !pending.iter().any(|q| q.date == p.date && q.t == p.t)))
-            .map_err(io_err)?;
-
-        let mut remote = Vec::new();
-        loop {
-            let path = format!(
-                "/rest/v1/weight_entries?select=entry_date,weight_kg,waist_cm,steps,updated_at&order=entry_date.asc&limit={PAGE}&offset={}",
-                remote.len()
-            );
-            let part: Vec<Row> =
-                self.rest(db, &mut s, Method::GET, &path, |r| r).await?.json().await.map_err(net_err)?;
-            let n = part.len();
-            remote.extend(part);
-            if n < PAGE {
-                break;
-            }
+        self.upsert(db, &mut s, "day_logs", "user_id,log_date", &days).await?;
+        if settings_up {
+            let row = ProfileRow {
+                user_id: Some(uid.clone()),
+                data: data.settings.clone(),
+                updated_at: stamp(data.settings.updated_ms),
+            };
+            self.upsert(db, &mut s, "profiles", "user_id", std::slice::from_ref(&row)).await?;
         }
-
+        // Убираем только отправленное: если что-то поменяли во время синка, его t другой.
         db.write(|d| {
-            let mut next: Vec<Entry> = Vec::with_capacity(remote.len());
-            for r in &remote {
-                weight::upsert(
-                    &mut next,
-                    Entry {
-                        date: r.entry_date.clone(),
-                        weight: r.weight_kg,
-                        waist: r.waist_cm,
-                        steps: r.steps,
-                        updated_ms: r.updated_at.as_deref().and_then(parse_ms).unwrap_or(0),
-                    },
-                );
-            }
-            // То, что ещё не ушло на сервер, важнее серверной версии.
-            for p in &d.pending {
-                match p.op {
-                    Op::Up => {
-                        if let Some(e) = d.entries.iter().find(|e| e.date == p.date) {
-                            weight::upsert(&mut next, e.clone());
-                        }
-                    }
-                    Op::Del => {
-                        weight::remove(&mut next, &p.date);
-                    }
-                }
-            }
-            d.entries = next;
-            d.entries.clone()
+            d.pending.retain(|p| !pending.iter().any(|q| q.kind == p.kind && q.date == p.date && q.t == p.t))
+        })
+        .map_err(io_err)?;
+
+        // 2. Скачать всё.
+        let rows: Vec<Row> = self
+            .pull(db, &mut s, "weight_entries", "entry_date,weight_kg,waist_cm,steps,hips_cm,chest_cm,updated_at", "entry_date")
+            .await?;
+        let day_rows: Vec<DayRow> = self.pull(db, &mut s, "day_logs", "log_date,data,updated_at", "log_date").await?;
+        let profile: Option<ProfileRow> =
+            self.pull(db, &mut s, "profiles", "data,updated_at", "user_id").await?.into_iter().next();
+
+        // 3. Сервер поверх локального, кроме того, что ещё не ушло.
+        db.write(|d| {
+            merge(d, rows, day_rows, profile);
+            d.snapshot()
         })
         .map_err(io_err)
+    }
+
+    async fn upsert<T: Serialize>(
+        &self,
+        db: &Db,
+        s: &mut Session,
+        table: &str,
+        conflict: &str,
+        rows: &[T],
+    ) -> Result<(), String> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let body = serde_json::to_value(rows).map_err(|e| e.to_string())?;
+        let path = format!("/rest/v1/{table}?on_conflict={conflict}");
+        self.rest(db, s, Method::POST, &path, |r| r.header("Prefer", "resolution=merge-duplicates,return=minimal").json(&body))
+            .await
+            .map(|_| ())
+    }
+
+    /// Все строки пользователя из таблицы, постранично.
+    async fn pull<T: serde::de::DeserializeOwned>(
+        &self,
+        db: &Db,
+        s: &mut Session,
+        table: &str,
+        select: &str,
+        order: &str,
+    ) -> Result<Vec<T>, String> {
+        let mut out = Vec::new();
+        loop {
+            let path = format!("/rest/v1/{table}?select={select}&order={order}.asc&limit={PAGE}&offset={}", out.len());
+            let part: Vec<T> = self.rest(db, s, Method::GET, &path, |r| r).await?.json().await.map_err(net_err)?;
+            let n = part.len();
+            out.extend(part);
+            if n < PAGE {
+                return Ok(out);
+            }
+        }
     }
 
     /// Текущая сессия, обновлённая заранее, если токен вот-вот истечёт.
@@ -320,6 +429,9 @@ impl Supabase {
                 *s = self.refresh(db, s).await?;
                 continue;
             }
+            if r.status() == StatusCode::NOT_FOUND && path.starts_with("/functions/") {
+                return Err(AI_OFF.into());
+            }
             if !r.status().is_success() {
                 return Err(error_text(r).await);
             }
@@ -327,6 +439,60 @@ impl Supabase {
         }
         Err("Сессия истекла, войди заново".into())
     }
+}
+
+/// Слить скачанное с локальным. Всё, что ещё лежит в `pending`, важнее серверной версии.
+fn merge(d: &mut Data, rows: Vec<Row>, day_rows: Vec<DayRow>, profile: Option<ProfileRow>) {
+    let mut entries: Vec<Entry> = Vec::with_capacity(rows.len());
+    for r in rows {
+        weight::upsert(
+            &mut entries,
+            Entry {
+                date: r.entry_date,
+                weight: r.weight_kg,
+                waist: r.waist_cm,
+                steps: r.steps,
+                hips: r.hips_cm,
+                chest: r.chest_cm,
+                updated_ms: r.updated_at.as_deref().and_then(parse_ms).unwrap_or(0),
+            },
+        );
+    }
+    for p in d.pending.iter().filter(|p| p.kind == Kind::Weight) {
+        match p.op {
+            Op::Up => {
+                if let Some(e) = d.entries.iter().find(|e| e.date == p.date) {
+                    weight::upsert(&mut entries, e.clone());
+                }
+            }
+            Op::Del => {
+                weight::remove(&mut entries, &p.date);
+            }
+        }
+    }
+
+    let mut days: Vec<DayLog> = Vec::with_capacity(day_rows.len());
+    for r in day_rows {
+        let updated_ms = r.updated_at.as_deref().and_then(parse_ms).unwrap_or(0);
+        diary::upsert(&mut days, DayLog { date: r.log_date, items: r.data.items, water_ml: r.data.water_ml, updated_ms });
+    }
+    for p in d.pending.iter().filter(|p| p.kind == Kind::Day) {
+        if let Some(x) = d.days.iter().find(|x| x.date == p.date) {
+            diary::upsert(&mut days, x.clone());
+        }
+    }
+
+    // Настройки: побеждает более свежая версия. Вкладка и день остаются свои.
+    let settings_pending = d.pending.iter().any(|p| p.kind == Kind::Settings);
+    if let Some(p) = profile
+        && !settings_pending
+        && p.data.updated_ms > d.settings.updated_ms
+    {
+        let (tab, day) = (d.settings.tab, d.settings.day);
+        d.settings = Settings { tab, day, ..p.data };
+    }
+    d.entries = entries;
+    d.days = days;
 }
 
 const NO_NET: &str = "Нет сети";
@@ -395,6 +561,58 @@ mod tests {
         assert_eq!(iso_ms(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(parse_ms("2026-11-23T10:15:00.5+00:00"), parse_ms("2026-11-23T10:15:00.500Z"));
         assert_eq!(parse_ms("2026-11-23T10:15:00+00:00"), Some(iso_parse_check()));
+    }
+
+    fn row(date: &str, weight: f64) -> Row {
+        Row {
+            user_id: None,
+            entry_date: date.into(),
+            weight_kg: weight,
+            waist_cm: None,
+            steps: None,
+            hips_cm: None,
+            chest_cm: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn merge_keeps_unsent_changes() {
+        let mut d = Data::default();
+        // локально: вес за 23-е изменён и ещё не отправлен, 22-е удалено
+        d.entries = vec![Entry { date: "2026-11-23".into(), weight: 90.0, ..Entry::default() }];
+        d.mark(Kind::Weight, "2026-11-23", Op::Up, 1);
+        d.mark(Kind::Weight, "2026-11-22", Op::Del, 1);
+        let mut day = DayLog::new("2026-11-23");
+        day.water_ml = 500;
+        d.days = vec![day];
+        d.mark(Kind::Day, "2026-11-23", Op::Up, 1);
+        d.settings.updated_ms = 10;
+
+        let server_day = DayRow {
+            user_id: None,
+            log_date: "2026-11-21".into(),
+            data: DayData { items: vec![], water_ml: 1000 },
+            updated_at: None,
+        };
+        let remote_settings = Settings { updated_ms: 20, day: 5, ..Settings::default() };
+        let profile = ProfileRow { user_id: None, data: remote_settings, updated_at: None };
+        d.settings.day = 2;
+
+        merge(
+            &mut d,
+            vec![row("2026-11-21", 95.0), row("2026-11-22", 94.0), row("2026-11-23", 93.0)],
+            vec![server_day],
+            Some(profile),
+        );
+
+        let w: Vec<_> = d.entries.iter().map(|e| (e.date.as_str(), e.weight)).collect();
+        assert_eq!(w, [("2026-11-21", 95.0), ("2026-11-23", 90.0)]);
+        let days: Vec<_> = d.days.iter().map(|x| (x.date.as_str(), x.water_ml)).collect();
+        assert_eq!(days, [("2026-11-21", 1000), ("2026-11-23", 500)]);
+        // более свежие настройки с сервера приняты, но выбранный день остался свой
+        assert_eq!(d.settings.updated_ms, 20);
+        assert_eq!(d.settings.day, 2);
     }
 
     fn iso_parse_check() -> i64 {

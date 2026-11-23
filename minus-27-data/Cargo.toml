@@ -1,6 +1,6 @@
 [package]
 name = "minus27-data"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 
 # Хранение и синк с Supabase. Общий для приложения (src-tauri) и сайта (WASM).

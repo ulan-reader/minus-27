@@ -5,10 +5,11 @@
 use std::rc::Rc;
 
 use minus27_core::{
-    state::{Settings, SyncInfo},
+    diary::DayLog,
+    state::{Reminder, Settings, SyncInfo},
     weight::Entry,
 };
-use minus27_data::{Db, Remote, Snapshot, web::LocalStore};
+use minus27_data::{Db, Remote, Snapshot, sync::Estimate, web::LocalStore};
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
@@ -67,6 +68,26 @@ struct DateArg<'a> {
 }
 
 #[derive(Serialize)]
+struct DayArg<'a> {
+    day: &'a DayLog,
+}
+
+#[derive(Serialize)]
+struct DataArg<'a> {
+    data: &'a Snapshot,
+}
+
+#[derive(Serialize)]
+struct ImageArg<'a> {
+    image: &'a str,
+}
+
+#[derive(Serialize)]
+struct RemindersArg<'a> {
+    list: &'a [Reminder],
+}
+
+#[derive(Serialize)]
 struct SignInArgs<'a> {
     email: &'a str,
     password: &'a str,
@@ -76,7 +97,8 @@ pub async fn load() -> Result<Snapshot, String> {
     if tauri() { call("load", &NoArgs {}).await } else { Ok(web().db.snapshot()) }
 }
 
-pub async fn save_settings(s: &Settings) -> Result<(), String> {
+/// Возвращает сохранённые настройки (с новой отметкой времени для синка).
+pub async fn save_settings(s: &Settings) -> Result<Settings, String> {
     if tauri() {
         call("save_settings", &SettingsArg { settings: s }).await
     } else {
@@ -90,6 +112,33 @@ pub async fn save_entry(e: &Entry) -> Result<Vec<Entry>, String> {
 
 pub async fn delete_entry(date: &str) -> Result<Vec<Entry>, String> {
     if tauri() { call("delete_entry", &DateArg { date }).await } else { web().db.delete_entry(date) }
+}
+
+pub async fn save_day(d: &DayLog) -> Result<Vec<DayLog>, String> {
+    if tauri() { call("save_day", &DayArg { day: d }).await } else { web().db.save_day(d.clone()) }
+}
+
+pub async fn import_data(data: &Snapshot) -> Result<Snapshot, String> {
+    if tauri() { call("import_data", &DataArg { data }).await } else { web().db.import(data.clone()) }
+}
+
+pub async fn estimate_food(image: &str) -> Result<Estimate, String> {
+    if tauri() {
+        call("estimate_food", &ImageArg { image }).await
+    } else {
+        let w = web();
+        w.remote.estimate_food(&w.db, image).await
+    }
+}
+
+/// Поставить напоминания. `false` — не поддерживается (сайт, компьютер) или нет разрешения.
+pub async fn set_reminders(list: &[Reminder]) -> Result<bool, String> {
+    if tauri() { call("set_reminders", &RemindersArg { list }).await } else { Ok(false) }
+}
+
+/// Внутри приложения (а не на сайте): там есть напоминания.
+pub fn is_app() -> bool {
+    tauri()
 }
 
 pub async fn sync_info() -> Result<SyncInfo, String> {
@@ -119,7 +168,7 @@ pub async fn sign_out() -> Result<SyncInfo, String> {
     }
 }
 
-pub async fn sync_now() -> Result<Vec<Entry>, String> {
+pub async fn sync_now() -> Result<Snapshot, String> {
     if tauri() {
         call("sync_now", &NoArgs {}).await
     } else {

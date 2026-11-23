@@ -11,7 +11,7 @@ pub fn svg(list: &[Point], roll: &[f64], goal: f64) -> Option<String> {
     if list.len() < 2 {
         return None;
     }
-    let (w, h, pl, pr, pt, pb) = (720.0, 260.0, 46.0, 14.0, 14.0, 28.0);
+    let (w, h, pl, pr, pt, pb) = (360.0, 200.0, 34.0, 8.0, 10.0, 22.0);
     let ws = list.iter().map(|p| p.entry.weight);
     let mut lo = ws.clone().fold(f64::INFINITY, f64::min);
     let mut hi = ws.fold(f64::NEG_INFINITY, f64::max);
@@ -44,7 +44,7 @@ pub fn svg(list: &[Point], roll: &[f64], goal: f64) -> Option<String> {
         let _ = write!(s, r#"<line x1="{pl}" x2="{}" y1="{g:.1}" y2="{g:.1}" class="goal"/>"#, w - pr, g = y(goal));
     }
     for p in list {
-        let _ = write!(s, r#"<circle cx="{:.1}" cy="{:.1}" r="3.5" class="dot"/>"#, x(p.n), y(p.entry.weight));
+        let _ = write!(s, r#"<circle cx="{:.1}" cy="{:.1}" r="2.6" class="dot"/>"#, x(p.n), y(p.entry.weight));
     }
     let pts: Vec<String> = list.iter().zip(roll).map(|(p, r)| format!("{:.1},{:.1}", x(p.n), y(*r))).collect();
     let _ = write!(s, r#"<polyline class="avg" points="{}"/>"#, pts.join(" "));

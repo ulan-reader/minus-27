@@ -54,3 +54,31 @@ pub fn delta_class(d: Option<f64>) -> &'static str {
         _ => "",
     }
 }
+
+/// 250 мл → "0,25", 1500 → "1,5", 3000 → "3"
+pub fn liters(ml: u32) -> String {
+    let s = format!("{:.2}", ml as f64 / 1000.0);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    s.replace('.', ",")
+}
+
+/// Целое с пробелами: 2 090
+pub fn int(n: f64) -> String {
+    thousands(n.round() as i64)
+}
+
+/// 97 вместо 97.0, 97,5 как есть
+pub fn trim0(n: f64) -> String {
+    if n.fract() == 0.0 { format!("{n:.0}") } else { f1(n) }
+}
+
+/// "2026-11-23" → "понедельник, 23 ноября"
+pub fn long_date(iso: &str) -> String {
+    const WD: [&str; 7] = ["четверг", "пятница", "суббота", "воскресенье", "понедельник", "вторник", "среда"];
+    const M: [&str; 12] = [
+        "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря",
+    ];
+    let Some(n) = minus27_core::weight::day_num(iso) else { return iso.to_string() };
+    let (_, m, d) = civil(n);
+    format!("{}, {d} {}", WD[n.rem_euclid(7) as usize], M[m as usize - 1])
+}

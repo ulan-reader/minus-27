@@ -9,3 +9,6 @@
 *.jks
 *.keystore
 keystore.properties
+
+# Настройки Claude Code
+/.claude/

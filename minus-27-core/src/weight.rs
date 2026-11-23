@@ -1,12 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 /// Запись за день. Дата в формате "2026-11-22", одна запись на дату.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub date: String,
     pub weight: f64,
     pub waist: Option<f64>,
     pub steps: Option<u32>,
+    #[serde(default)]
+    pub hips: Option<f64>,
+    #[serde(default)]
+    pub chest: Option<f64>,
     /// Когда запись последний раз менялась, мс от эпохи. Ставит бэкенд.
     #[serde(default)]
     pub updated_ms: i64,
@@ -128,6 +132,9 @@ pub fn check(e: &Entry, today: Option<i32>) -> Result<(), &'static str> {
     }
     if e.waist.is_some_and(|w| !(40.0..=250.0).contains(&w)) {
         return Err("Талия: от 40 до 250 см");
+    }
+    if [e.hips, e.chest].iter().flatten().any(|v| !(40.0..=250.0).contains(v)) {
+        return Err("Бёдра и грудь: от 40 до 250 см");
     }
     if e.steps.is_some_and(|s| s > 100_000) {
         return Err("Шаги: от 0 до 100 000");
@@ -280,7 +287,7 @@ mod tests {
     use super::*;
 
     fn e(date: &str, weight: f64) -> Entry {
-        Entry { date: date.into(), weight, waist: None, steps: None, updated_ms: 0 }
+        Entry { date: date.into(), weight, ..Entry::default() }
     }
 
     /// Ежедневные записи с шагом `step` кг в день, начиная с 2026-01-01.

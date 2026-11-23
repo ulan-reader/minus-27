@@ -3,7 +3,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use minus27_core::weight::{self, Entry, Eta};
 
-use crate::{api, app::Store, chart, fmt, js};
+use crate::{api, app::Store, chart, fmt, icons::icon, js};
 
 /// Поле формы → число. Пусто = `Ok(None)`, мусор = `Err`.
 fn parse(s: &str) -> Result<Option<f64>, ()> {
@@ -19,17 +19,23 @@ fn round1(v: f64) -> f64 {
 }
 
 #[component]
-pub fn WeightTab() -> impl IntoView {
+pub fn ProgressScreen() -> impl IntoView {
     let store = expect_context::<Store>();
-    // Форма общая: её заполняет и сама форма, и кнопка ✎ в таблице записей.
+    // Форма общая: её заполняет и сама форма, и кнопка правки в таблице записей.
     provide_context(Form {
         date: RwSignal::new(js::today_iso()),
         weight: RwSignal::new(String::new()),
         waist: RwSignal::new(String::new()),
+        hips: RwSignal::new(String::new()),
+        chest: RwSignal::new(String::new()),
         steps: RwSignal::new(String::new()),
     });
+    let goal = move || store.settings.with(|s| s.profile.as_ref().map(|p| p.goal_weight).unwrap_or(s.goal));
     view! {
-        <SyncCard/>
+        <header class="top">
+            <p class="mut">{move || format!("Цель {} кг", fmt::trim0(goal()))}</p>
+            <h1>"Прогресс"</h1>
+        </header>
         <EntryForm/>
         {move || {
             if store.entries.with(|e| e.is_empty()) {
@@ -41,105 +47,14 @@ pub fn WeightTab() -> impl IntoView {
     }
 }
 
-#[component]
-fn SyncCard() -> impl IntoView {
-    let store = expect_context::<Store>();
-    let email = RwSignal::new(String::new());
-    let password = RwSignal::new(String::new());
-    let err = RwSignal::new(String::new());
-    let busy = RwSignal::new(false);
-
-    let on_login = move |ev: SubmitEvent| {
-        ev.prevent_default();
-        err.set(String::new());
-        busy.set(true);
-        spawn_local(async move {
-            match api::sign_in(&email.get_untracked(), &password.get_untracked()).await {
-                Ok(info) => {
-                    password.set(String::new());
-                    store.sync.set(info);
-                    store.sync();
-                }
-                Err(e) => err.set(e),
-            }
-            busy.set(false);
-        });
-    };
-
-    let on_logout = move |_: leptos::ev::MouseEvent| {
-        spawn_local(async move {
-            if let Ok(info) = api::sign_out().await {
-                store.sync.set(info);
-                store.sync_status.set(String::new());
-            }
-        });
-    };
-
-    move || {
-        let info = store.sync.get();
-        if !info.enabled {
-            return view! {
-                <div class="card">
-                    <b>"💾 Данные хранятся на этом устройстве"</b>
-                    <p class="hint">
-                        "Для синхронизации впиши адрес и ключ Supabase в supabase/supabase.env и выполни supabase/schema.sql."
-                    </p>
-                </div>
-            }
-            .into_any();
-        }
-        if let Some(who) = info.account {
-            return view! {
-                <div class="card">
-                    <div class="row">
-                        <b>{format!("☁️ {who}")}</b>
-                        <span style="flex:1"></span>
-                        <button type="button" class="btn sm" on:click=move |_| store.sync()>"Синхронизировать"</button>
-                        <button type="button" class="btn sm" on:click=on_logout>"Выйти"</button>
-                    </div>
-                    <p class="hint">{move || store.sync_status.get()}</p>
-                </div>
-            }
-            .into_any();
-        }
-        view! {
-            <form class="card" on:submit=on_login>
-                <b>"☁️ Войти для синхронизации"</b>
-                <div class="row" style="margin-top:10px">
-                    <input
-                        type="email"
-                        autocomplete="username"
-                        required
-                        placeholder="email"
-                        prop:value=move || email.get()
-                        on:input=move |ev| email.set(event_target_value(&ev))
-                    />
-                    <input
-                        type="password"
-                        autocomplete="current-password"
-                        required
-                        placeholder="пароль"
-                        prop:value=move || password.get()
-                        on:input=move |ev| password.set(event_target_value(&ev))
-                    />
-                    <button class="btn pri" type="submit" disabled=move || busy.get()>
-                        {move || if busy.get() { "Вход…" } else { "Войти" }}
-                    </button>
-                </div>
-                <span class="err">{move || err.get()}</span>
-                <p class="hint">{move || store.sync_status.get()}</p>
-            </form>
-        }
-        .into_any()
-    }
-}
-
 /// Поля формы записи, строками как в input.
 #[derive(Clone, Copy)]
 struct Form {
     date: RwSignal<String>,
     weight: RwSignal<String>,
     waist: RwSignal<String>,
+    hips: RwSignal<String>,
+    chest: RwSignal<String>,
     steps: RwSignal<String>,
 }
 
@@ -150,11 +65,15 @@ impl Form {
             Some(e) => {
                 self.weight.set(e.weight.to_string());
                 self.waist.set(e.waist.map(|v| v.to_string()).unwrap_or_default());
+                self.hips.set(e.hips.map(|v| v.to_string()).unwrap_or_default());
+                self.chest.set(e.chest.map(|v| v.to_string()).unwrap_or_default());
                 self.steps.set(e.steps.map(|v| v.to_string()).unwrap_or_default());
             }
             None => {
                 self.weight.set(String::new());
                 self.waist.set(String::new());
+                self.hips.set(String::new());
+                self.chest.set(String::new());
                 self.steps.set(String::new());
             }
         }
@@ -175,9 +94,13 @@ fn EntryForm() -> impl IntoView {
     let on_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         err.set(String::new());
-        let (Ok(Some(w)), Ok(waist), Ok(steps)) =
-            (parse(&form.weight.get_untracked()), parse(&form.waist.get_untracked()), parse(&form.steps.get_untracked()))
-        else {
+        let (Ok(Some(w)), Ok(waist), Ok(hips), Ok(chest), Ok(steps)) = (
+            parse(&form.weight.get_untracked()),
+            parse(&form.waist.get_untracked()),
+            parse(&form.hips.get_untracked()),
+            parse(&form.chest.get_untracked()),
+            parse(&form.steps.get_untracked()),
+        ) else {
             err.set("Проверь числа: вес обязателен, остальное можно оставить пустым".into());
             return;
         };
@@ -189,6 +112,8 @@ fn EntryForm() -> impl IntoView {
             date: form.date.get_untracked(),
             weight: round1(w),
             waist: waist.map(round1),
+            hips: hips.map(round1),
+            chest: chest.map(round1),
             steps: steps.map(|s| s.round() as u32),
             updated_ms: 0,
         };
@@ -208,69 +133,56 @@ fn EntryForm() -> impl IntoView {
         });
     };
 
+    let field = move |label: &'static str, sig: RwSignal<String>, unit: &'static str, ph: &'static str| {
+        view! {
+            <label class="f">
+                <span>{label}</span>
+                <div class="unit">
+                    <input
+                        type="text"
+                        inputmode="decimal"
+                        placeholder=ph
+                        prop:value=move || sig.get()
+                        on:input=move |ev| sig.set(event_target_value(&ev))
+                    />
+                    <em>{unit}</em>
+                </div>
+            </label>
+        }
+    };
+
     view! {
         <form class="card" on:submit=on_submit>
-            <b>"➕ Запись"</b>
-            <div class="row" style="margin-top:10px">
-                <label class="f">
-                    "Дата"
-                    <input
-                        type="date"
-                        required
-                        prop:value=move || form.date.get()
-                        on:change=move |ev| {
-                            let d = event_target_value(&ev);
-                            store.entries.with_untracked(|es| form.fill(&d, es));
-                        }
-                    />
-                </label>
-                <label class="f">
-                    "Вес, кг"
-                    <input
-                        type="number"
-                        step="0.1"
-                        min="30"
-                        max="300"
-                        inputmode="decimal"
-                        placeholder="97.0"
-                        required
-                        prop:value=move || form.weight.get()
-                        on:input=move |ev| form.weight.set(event_target_value(&ev))
-                    />
-                </label>
-                <label class="f">
-                    "Талия, см"
-                    <input
-                        type="number"
-                        step="0.1"
-                        min="40"
-                        max="250"
-                        inputmode="decimal"
-                        placeholder="необязательно"
-                        prop:value=move || form.waist.get()
-                        on:input=move |ev| form.waist.set(event_target_value(&ev))
-                    />
-                </label>
-                <label class="f">
-                    "Шаги"
-                    <input
-                        type="number"
-                        step="1"
-                        min="0"
-                        max="100000"
-                        inputmode="numeric"
-                        placeholder="необязательно"
-                        prop:value=move || form.steps.get()
-                        on:input=move |ev| form.steps.set(event_target_value(&ev))
-                    />
-                </label>
+            <div class="row">
+                <span class="badge green">{icon("scale")}</span>
+                <b class="grow">"Запись"</b>
+                <input
+                    type="date"
+                    class="date"
+                    required
+                    prop:value=move || form.date.get()
+                    on:change=move |ev| {
+                        let d = event_target_value(&ev);
+                        store.entries.with_untracked(|es| form.fill(&d, es));
+                    }
+                />
             </div>
-            <div class="row" style="margin-top:10px">
-                <button type="submit" class="btn pri">{move || if exists() { "Обновить" } else { "Сохранить" }}</button>
-                <span class="err">{move || err.get()}</span>
+            <div class="grid2">
+                {field("Вес", form.weight, "кг", "97,0")}
+                {field("Шаги", form.steps, "", "необяз.")}
             </div>
+            <details class="more">
+                <summary>{icon("ruler")} "Замеры тела"</summary>
+                <div class="grid3">
+                    {field("Талия", form.waist, "см", "")}
+                    {field("Бёдра", form.hips, "см", "")}
+                    {field("Грудь", form.chest, "см", "")}
+                </div>
+            </details>
+            <button type="submit" class="btn pri wide">{move || if exists() { "Обновить" } else { "Сохранить" }}</button>
+            <p class="err">{move || err.get()}</p>
             <p class="hint">
-                "Взвешивайся утром: после туалета, до еды и воды, без одежды, на одних весах. Талию меряй раз в неделю по пупку."
+                "Взвешивайся утром: после туалета, до еды и воды, на одних весах. Замеры — раз в неделю, на выдохе."
             </p>
         </form>
     }
@@ -301,17 +213,9 @@ fn Analytics() -> impl IntoView {
         });
     };
 
-    let goal_input = move |ev: leptos::ev::Event| {
-        if let Ok(Some(g)) = parse(&event_target_value(&ev)) {
-            if (30.0..=300.0).contains(&g) {
-                store.set(|s| s.goal = g);
-            }
-        }
-    };
-
     move || {
         let list = store.entries.with(|e| weight::points(e));
-        let goal = store.settings.with(|s| s.goal);
+        let goal = store.settings.with(|s| s.profile.as_ref().map(|p| p.goal_weight).unwrap_or(s.goal));
         let roll = weight::rolling(&list);
         let weeks = weight::weekly_blocks(&list);
         let v = weight::verdict(&weeks);
@@ -323,7 +227,7 @@ fn Analytics() -> impl IntoView {
         let start_cls = if start - cur > 0.0 { "dn" } else { "" };
         let left = cur - goal;
         let (eta, eta_sub) = match weight::eta(last.n, cur, goal, pc) {
-            Eta::Reached => ("🎉".to_string(), "цель достигнута".to_string()),
+            Eta::Reached => ("Готово".to_string(), "цель достигнута".to_string()),
             Eta::At { day, weeks } => {
                 (fmt::month_year(day), format!("≈ {} нед. по текущему темпу, на деле дольше", weeks.round()))
             }
@@ -368,24 +272,27 @@ fn Analytics() -> impl IntoView {
                         <td>
                             <button
                                 type="button"
-                                class="btn sm"
-                                title="Изменить"
+                                class="icon-btn sm"
+                                aria-label="Изменить"
                                 on:click=move |_| {
                                     store.entries.with_untracked(|es| form.fill(&edit_date, es));
                                     js::scroll_top();
                                 }
                             >
-                                "✎"
+                                {icon("edit")}
                             </button>
-                            " "
                             <button
                                 type="button"
-                                class="btn sm"
-                                title="Удалить"
+                                class="icon-btn sm"
+                                aria-label="Удалить"
                                 on:click=move |_| delete(del_date.clone())
                             >
                                 {move || {
-                                    if confirm_del.get().as_deref() == Some(cmp_date.as_str()) { "Точно?" } else { "✕" }
+                                    if confirm_del.get().as_deref() == Some(cmp_date.as_str()) {
+                                        view! { <span class="danger-text">"Точно?"</span> }.into_any()
+                                    } else {
+                                        icon("trash").into_any()
+                                    }
                                 }}
                             </button>
                         </td>
@@ -411,30 +318,28 @@ fn Analytics() -> impl IntoView {
                 </div>
                 <div class="stat">
                     <b>{if left > 0.0 { format!("{} кг", fmt::f1(left)) } else { "0".into() }}</b>
-                    <span>"До цели"</span>
-                    <div>
-                        <input type="number" step="0.5" min="30" max="300" prop:value={goal.to_string()} on:change=goal_input/>
-                    </div>
+                    <span>{format!("До цели {} кг", fmt::trim0(goal))}</span>
                 </div>
                 <div class="stat">
                     <b>{pc.map(|p| format!("{} кг/нед", fmt::f1(p))).unwrap_or("—".into())}</b>
                     <span>"Темп (последние недели)"</span>
                 </div>
                 <div class="stat">
-                    <b style="font-size:18px">{eta}</b>
+                    <b class="sm">{eta}</b>
                     <span>{eta_sub}</span>
                 </div>
             </div>
             <div class={format!("card verdict {}", v.level.css())}>
-                <b>{format!("{} {}", v.level.icon(), v.title)}</b>
+                <b>{icon(match v.level { weight::Level::Ok => "check-circle", weight::Level::Warn => "flame", weight::Level::Info => "info" })} {v.title}</b>
                 {v.text}
             </div>
             <div class="card">
-                <b>"📈 Вес"</b>
+                <b>"Вес"</b>
                 <p class="hint">"Точки — каждый день, зелёная линия — среднее за 7 дней, пунктир — цель."</p>
                 {chart}
             </div>
-            <h2>"🗓️ По неделям"</h2>
+            {measures(&list)}
+            <h2>"По неделям"</h2>
             <div class="card scroll">
                 <table>
                     <thead>
@@ -451,7 +356,7 @@ fn Analytics() -> impl IntoView {
                 </table>
             </div>
             <p class="hint">"* меньше 3 взвешиваний: в выводы не идёт."</p>
-            <h2>"📋 Все записи"</h2>
+            <h2>"Все записи"</h2>
             <span class="err">{move || err.get()}</span>
             <div class="card scroll">
                 <table>
@@ -471,4 +376,37 @@ fn Analytics() -> impl IntoView {
         }
         .into_any()
     }
+}
+
+/// Замеры тела: последнее значение и разница с первым замером.
+fn measures(list: &[weight::Point]) -> impl IntoView + use<> {
+    let rows: Vec<(&'static str, f64, f64)> = [
+        ("Талия", list.iter().filter_map(|p| p.entry.waist).collect::<Vec<_>>()),
+        ("Бёдра", list.iter().filter_map(|p| p.entry.hips).collect()),
+        ("Грудь", list.iter().filter_map(|p| p.entry.chest).collect()),
+    ]
+    .into_iter()
+    .filter_map(|(n, v)| Some((n, *v.last()?, v.last()? - v.first()?)))
+    .collect();
+    (!rows.is_empty()).then(|| {
+        view! {
+            <div class="card">
+                <b>"Замеры"</b>
+                <div class="t3">
+                    {rows
+                        .into_iter()
+                        .map(|(n, last, d)| {
+                            view! {
+                                <div>
+                                    <b>{format!("{} см", fmt::trim0(last))}</b>
+                                    <span>{n}</span>
+                                    <span class={fmt::delta_class(Some(d))}>{fmt::signed(d)}</span>
+                                </div>
+                            }
+                        })
+                        .collect_view()}
+                </div>
+            </div>
+        }
+    })
 }
