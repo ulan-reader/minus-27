@@ -2818,13 +2818,11 @@ name = "minus-27"
 version = "0.1.0"
 dependencies = [
  "minus27-core",
- "reqwest",
+ "minus27-data",
  "serde",
- "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
- "webpki-root-certs",
 ]
 
 [[package]]
@@ -2835,6 +2833,7 @@ dependencies = [
  "js-sys",
  "leptos",
  "minus27-core",
+ "minus27-data",
  "serde",
  "serde-wasm-bindgen",
  "wasm-bindgen",
@@ -2846,6 +2845,19 @@ name = "minus27-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "minus27-data"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "minus27-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "webpki-root-certs",
 ]
 
 [[package]]
