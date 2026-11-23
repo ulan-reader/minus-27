@@ -49,10 +49,12 @@ jobs:
 
       - name: Сборка APK
         env:
-          NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
+          # NDK уже есть на раннере: переменная машины, в контексте ${{ env }} её не видно.
+          export NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$(ls -d "$ANDROID_HOME"/ndk/* | sort -V | tail -1)}"
+          echo "NDK: $NDK_HOME"
           cargo tauri android build --apk --target aarch64
           cp src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk "minus-27-${GITHUB_REF_NAME}.apk"
 
