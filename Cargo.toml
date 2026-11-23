@@ -12,10 +12,11 @@ js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 minus27-core = { path = "minus-27-core" }
+minus27-data = { path = "minus-27-data" }
 console_error_panic_hook = "0.1.7"
 
 [workspace]
-members = ["minus-27-core","src-tauri"]
+members = ["minus-27-core", "minus-27-data", "src-tauri"]
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

@@ -1,4 +1,4 @@
-//! Подключение к Supabase. Значения подставляет build.rs из src-tauri/supabase.env
+//! Подключение к Supabase. Значения подставляет build.rs из supabase/supabase.env
 //! (файл не в git, образец: supabase.env.example) или из переменных окружения.
 //! Пусто = синк выключен, данные только на устройстве.
 //! Ключ публичный (anon / publishable), чужие данные защищает RLS из supabase/schema.sql.

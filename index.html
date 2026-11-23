@@ -2,13 +2,29 @@
 <html lang="ru">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />
     <meta name="theme-color" content="#0d1117" />
     <title>Минус 27</title>
+    <!-- Сайт как приложение: «На экран Домой» на iPhone и «Установить» на Android -->
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="icon-256.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-title" content="Минус 27" />
     <link data-trunk rel="css" href="styles.css" />
-    <link data-trunk rel="copy-dir" href="public" />
+    <link data-trunk rel="copy-file" href="web/manifest.webmanifest" />
+    <link data-trunk rel="copy-file" href="web/sw.js" />
+    <link data-trunk rel="copy-file" href="web/icon-256.png" />
+    <link data-trunk rel="copy-file" href="web/icon-512.png" />
     <link data-trunk rel="rust" data-wasm-opt="z" />
+    <script>
+      // Офлайн-режим только для сайта: в Tauri файлы и так лежат в приложении.
+      if ('serviceWorker' in navigator && !window.__TAURI__ && location.protocol === 'https:') {
+        navigator.serviceWorker.register('sw.js');
+      }
+    </script>
   </head>
   <body></body>
 </html>

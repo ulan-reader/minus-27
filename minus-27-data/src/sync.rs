@@ -3,12 +3,9 @@
 //! Схема: локальные изменения копятся в `Data::pending`. `sync` отправляет их
 //! (upsert и delete), скачивает все записи с сервера и кладёт их поверх локальных.
 //! Изменения, сделанные во время синка, остаются в `pending` и не теряются.
-//! Включается заполнением config.rs.
+//! Включается заполнением supabase/supabase.env (см. config.rs).
 
-use std::{
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use minus27_core::{
     state::SyncInfo,
@@ -23,7 +20,7 @@ use crate::{
     storage::{self, Db, Op},
 };
 
-/// Вход в Supabase. Хранится в data.json, в UI не уходит.
+/// Вход в Supabase. Хранится вместе с данными (data.json или localStorage).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Session {
     pub access_token: String,
@@ -53,12 +50,7 @@ impl Remote {
         if config::SUPABASE_URL.is_empty() || config::SUPABASE_ANON_KEY.is_empty() {
             return Remote::Off;
         }
-        // Корни из webpki-root-certs, а не системные: системный верификатор
-        // на Android требует отдельной инициализации через JNI.
-        let certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
-            .iter()
-            .filter_map(|c| reqwest::Certificate::from_der(c.as_ref()).ok());
-        match Client::builder().timeout(Duration::from_secs(20)).tls_certs_only(certs).build() {
+        match http_client() {
             Ok(http) => Remote::Supabase(Supabase {
                 url: config::SUPABASE_URL.trim_end_matches('/').to_string(),
                 key: config::SUPABASE_ANON_KEY.to_string(),
@@ -110,6 +102,23 @@ impl Remote {
         sb.busy.store(false, Ordering::SeqCst);
         res
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn http_client() -> reqwest::Result<Client> {
+    use std::time::Duration;
+    // Корни из webpki-root-certs, а не системные: системный верификатор
+    // на Android требует отдельной инициализации через JNI.
+    let certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .filter_map(|c| reqwest::Certificate::from_der(c.as_ref()).ok());
+    Client::builder().timeout(Duration::from_secs(20)).tls_certs_only(certs).build()
+}
+
+/// В браузере запросы идут через fetch, TLS и таймауты на его стороне.
+#[cfg(target_arch = "wasm32")]
+fn http_client() -> reqwest::Result<Client> {
+    Client::builder().build()
 }
 
 const OFF: &str = "Синхронизация выключена";
@@ -323,7 +332,18 @@ impl Supabase {
 const NO_NET: &str = "Нет сети";
 
 fn net_err(e: reqwest::Error) -> String {
-    if e.is_connect() || e.is_timeout() { format!("{NO_NET}, изменения отправятся при следующем синке") } else { e.to_string() }
+    if is_offline(&e) { format!("{NO_NET}, изменения отправятся при следующем синке") } else { e.to_string() }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_offline(e: &reqwest::Error) -> bool {
+    e.is_connect() || e.is_timeout()
+}
+
+/// В браузере сбой fetch (нет сети, CORS) виден только как ошибка запроса.
+#[cfg(target_arch = "wasm32")]
+fn is_offline(e: &reqwest::Error) -> bool {
+    e.is_request() || e.is_timeout()
 }
 
 fn io_err(e: std::io::Error) -> String {

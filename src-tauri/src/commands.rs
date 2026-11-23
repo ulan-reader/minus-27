@@ -1,56 +1,31 @@
 //! Команды, которые вызывает UI через `invoke`. Ошибки уходят строкой.
+//! Сама логика в minus27-data: её же использует сайт.
 
 use minus27_core::{
     state::{Settings, SyncInfo},
-    weight::{self, Entry},
+    weight::Entry,
 };
-use serde::Serialize;
+use minus27_data::{Db, Remote, Snapshot};
 use tauri::State;
-
-use crate::{
-    storage::{self, Db, Op},
-    sync::Remote,
-};
-
-#[derive(Serialize)]
-pub struct Snapshot {
-    settings: Settings,
-    entries: Vec<Entry>,
-}
 
 #[tauri::command]
 pub fn load(db: State<'_, Db>) -> Snapshot {
-    db.read(|d| Snapshot { settings: d.settings.clone(), entries: d.entries.clone() })
+    db.snapshot()
 }
 
 #[tauri::command]
 pub fn save_settings(db: State<'_, Db>, settings: Settings) -> Result<(), String> {
-    db.write(|d| d.settings = settings).map_err(|e| e.to_string())
+    db.save_settings(settings)
 }
 
-/// Сохраняет запись (новую или поверх старой за ту же дату) и возвращает все записи.
 #[tauri::command]
 pub fn save_entry(db: State<'_, Db>, entry: Entry) -> Result<Vec<Entry>, String> {
-    weight::check(&entry, None)?;
-    let t = storage::now_ms();
-    db.write(|d| {
-        d.mark(&entry.date, Op::Up, t);
-        weight::upsert(&mut d.entries, Entry { updated_ms: t, ..entry });
-        d.entries.clone()
-    })
-    .map_err(|e| e.to_string())
+    db.save_entry(entry)
 }
 
 #[tauri::command]
 pub fn delete_entry(db: State<'_, Db>, date: String) -> Result<Vec<Entry>, String> {
-    let t = storage::now_ms();
-    db.write(|d| {
-        if weight::remove(&mut d.entries, &date) {
-            d.mark(&date, Op::Del, t);
-        }
-        d.entries.clone()
-    })
-    .map_err(|e| e.to_string())
+    db.delete_entry(&date)
 }
 
 #[tauri::command]

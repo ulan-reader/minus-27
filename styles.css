@@ -75,3 +75,6 @@ th{color:var(--mut);font-weight:600;font-size:12.5px;position:sticky;top:0;backg
 h2{font-size:17px;margin:20px 2px 4px}
 .copied{white-space:pre-wrap}
 .card.err{font-size:14px}
+/* iPhone: отступ под полоску «домой» и без автозума полей (Safari зумит при шрифте меньше 16px) */
+.wrap{padding-bottom:calc(60px + env(safe-area-inset-bottom));padding-left:max(14px,env(safe-area-inset-left));padding-right:max(14px,env(safe-area-inset-right))}
+@media (max-width:600px){input{font-size:16px}}

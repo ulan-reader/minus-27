@@ -82,7 +82,7 @@ fn SyncCard() -> impl IntoView {
                 <div class="card">
                     <b>"💾 Данные хранятся на этом устройстве"</b>
                     <p class="hint">
-                        "Для синхронизации впиши адрес и ключ Supabase в src-tauri/src/config.rs и выполни supabase/schema.sql."
+                        "Для синхронизации впиши адрес и ключ Supabase в supabase/supabase.env и выполни supabase/schema.sql."
                     </p>
                 </div>
             }

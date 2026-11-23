@@ -5,7 +5,7 @@
 /.idea/
 
 # Секреты: ключи Supabase и подпись APK
-/src-tauri/supabase.env
+/supabase/supabase.env
 *.jks
 *.keystore
 keystore.properties

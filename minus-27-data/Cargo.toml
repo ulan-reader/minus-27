@@ -1,0 +1,21 @@
+[package]
+name = "minus27-data"
+version = "0.1.0"
+edition = "2024"
+
+# Хранение и синк с Supabase. Общий для приложения (src-tauri) и сайта (WASM).
+[dependencies]
+minus27-core = { path = "../minus-27-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# На WASM reqwest ходит через fetch браузера, TLS-зависимости подключаются только нативно.
+reqwest = { version = "0.13", features = ["json"] }
+# localStorage для сайта (src/web.rs); на других платформах просто не вызывается
+wasm-bindgen = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Корневые сертификаты, см. Remote::from_config
+webpki-root-certs = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
