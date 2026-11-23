@@ -1,0 +1,8 @@
+[package]
+name = "minus27-core"
+version = "0.1.0"
+edition = "2024"
+
+# Чистая логика: без UI, файлов и сети. Собирается и под WASM, и под Android.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
